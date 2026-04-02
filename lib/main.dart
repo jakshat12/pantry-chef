@@ -826,20 +826,25 @@ Future<List<GroqRecipe>> searchGroqRecipes(String apiKey, String keyword, List<S
       : '';
 
   final prompt = '''
-You are an expert Indian vegetarian chef. \$pantryContext
-Suggest 5 Indian vegetarian eggless recipes related to: "\$keyword"
+You are an expert Indian vegetarian chef.
+The user searched for: "$keyword"
+
+Your job is to suggest 5 Indian vegetarian eggless recipes that are DIRECTLY related to "$keyword".
+IMPORTANT: Every single recipe MUST contain "$keyword" as a key ingredient or be a direct variation of "$keyword".
+Do NOT suggest unrelated recipes. If the keyword is "lauki paratha", all 5 recipes must feature lauki (bottle gourd) or paratha or both.
+If the keyword is "paneer", all recipes must use paneer as a main ingredient.
+$pantryContext
 
 Respond ONLY with a valid JSON array. No explanation, no markdown, no extra text.
-Each recipe must have exactly these fields:
 [
   {
     "name": "Recipe Name",
-    "description": "2 sentence description",
+    "description": "2 sentence description mentioning $keyword",
     "difficulty": "Easy",
     "time": "25 mins",
     "timeMinutes": 25,
     "ingredients": ["ingredient1", "ingredient2"],
-    "youtubeSearch": "recipe name recipe authentic indian",
+    "youtubeSearch": "recipe name authentic indian recipe",
     "proteinG": 12,
     "carbsG": 45
   }
@@ -849,18 +854,19 @@ Rules:
 - timeMinutes must be an integer
 - proteinG is approximate protein per serving in grams (integer)
 - carbsG is approximate carbohydrates per serving in grams (integer)
+- ALL recipes must be directly related to: "$keyword"
 ''';
 
   final response = await http.post(
     Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer \$apiKey',
+      'Authorization': 'Bearer ' + apiKey,
     },
     body: jsonEncode({
       'model': 'llama-3.3-70b-versatile',
       'messages': [{'role': 'user', 'content': prompt}],
-      'temperature': 0.7,
+      'temperature': 0.2,
       'max_tokens': 1500,
     }),
   );
@@ -899,7 +905,7 @@ No explanation, no markdown, just the JSON object.
     Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer \$apiKey',
+      'Authorization': 'Bearer ' + apiKey,
     },
     body: jsonEncode({
       'model': 'llama-3.3-70b-versatile',
@@ -1451,6 +1457,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _keyController = TextEditingController();
   bool _obscure = true;
   bool _saved = false;
+  bool _testing = false;
 
   @override
   void initState() {
@@ -1469,7 +1476,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final trimmed = _keyController.text.trim();
     if (!trimmed.startsWith('gsk_')) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Key should start with gsk_ — please check and try again'),
+        content: Text('Key should start with gsk_ - please check and try again'),
         backgroundColor: Color(0xFFE24B4A),
         behavior: SnackBarBehavior.floating,
       ));
@@ -1480,6 +1487,60 @@ class _SettingsScreenState extends State<SettingsScreen> {
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) setState(() => _saved = false);
     });
+  }
+
+  Future<void> _testKey() async {
+    final trimmed = _keyController.text.trim();
+    if (trimmed.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Please enter a key first'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    setState(() => _testing = true);
+    try {
+      final response = await http.post(
+        Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + trimmed,
+        },
+        body: jsonEncode({
+          'model': 'llama-3.3-70b-versatile',
+          'messages': [{'role': 'user', 'content': 'Say OK'}],
+          'max_tokens': 5,
+        }),
+      );
+      debugPrint('Test status: ' + response.statusCode.toString());
+      debugPrint('Test body: ' + response.body);
+      if (response.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('API key works!'),
+          backgroundColor: Color(0xFF3B6D11),
+          behavior: SnackBarBehavior.floating,
+        ));
+        // Auto save if test passes
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('groq_api_key', trimmed);
+        setState(() => _saved = true);
+      } else {
+        final body = jsonDecode(response.body);
+        final msg = body['error']?['message'] ?? 'Unknown error';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed (' + response.statusCode.toString() + '): ' + msg),
+          backgroundColor: const Color(0xFFE24B4A),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Error: ' + e.toString()),
+        backgroundColor: const Color(0xFFE24B4A),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+    setState(() => _testing = false);
   }
 
   Future<void> _clearKey() async {
@@ -1536,6 +1597,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               const SizedBox(height: 12),
+              // Test button
+              SizedBox(width: double.infinity, child: ElevatedButton(
+                onPressed: _testing ? null : _testKey,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF185FA5),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+                child: _testing
+                    ? const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
+                  SizedBox(width: 8),
+                  Text('Testing...'),
+                ])
+                    : const Text('Test & Save Key', style: TextStyle(fontWeight: FontWeight.w600)),
+              )),
+              const SizedBox(height: 8),
               Row(children: [
                 Expanded(child: ElevatedButton(
                   onPressed: _saveKey,
