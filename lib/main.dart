@@ -45,7 +45,7 @@ class PantryItem {
 
 // ─── Groq Vision OCR ──────────────────────────────────────────────────────────
 
-Future<List<String>> scanBillWithGroq(String apiKey, File imageFile) async {
+Future<List<String>> scanBillWithGroq(File imageFile) async {
   // Convert image to base64
   final bytes = await imageFile.readAsBytes();
   final base64Image = base64Encode(bytes);
@@ -55,10 +55,10 @@ Future<List<String>> scanBillWithGroq(String apiKey, File imageFile) async {
   final mimeType = path.endsWith('.png') ? 'image/png' : 'image/jpeg';
 
   final response = await http.post(
-    Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+    Uri.parse('https://pantry-chef-server.onrender.com/groq'),
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer $apiKey',
+      'X-App-Token': 'pantry-chef-app',
     },
     body: jsonEncode({
       'model': 'meta-llama/llama-4-scout-17b-16e-instruct',
@@ -453,21 +453,15 @@ class _ScanScreenState extends State<ScanScreen> {
         _statusMessage = 'Reading bill with Groq Vision AI...';
       });
 
-      // Load API key
-      final prefs = await SharedPreferences.getInstance();
-      final apiKey = prefs.getString('groq_api_key') ?? '';
-
       List<String> items = [];
-
-      if (apiKey.isNotEmpty) {
-        // Use Groq Vision for best accuracy
-        items = await scanBillWithGroq(apiKey, _imageFile!);
-        setState(() {
-          _statusMessage = 'AI scanned successfully!';
-        });
-      } else {
-        // Fallback to ML Kit if no API key
-        setState(() { _statusMessage = 'No API key — using basic OCR. Add Groq key in Recipes > Settings for better results.'; });
+      try {
+        // Use Groq Vision via proxy server
+        items = await scanBillWithGroq(_imageFile!);
+        setState(() { _statusMessage = 'AI scanned successfully!'; });
+      } catch (e) {
+        // Fallback to ML Kit if server unreachable
+        debugPrint('Groq Vision failed, falling back to ML Kit: ' + e.toString());
+        setState(() { _statusMessage = 'Using on-device OCR...'; });
         final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
         final inputImage = InputImage.fromFile(_imageFile!);
         final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
@@ -753,7 +747,7 @@ class GroqRecipe {
   }
 }
 
-Future<List<GroqRecipe>> fetchGroqRecipes(String apiKey, List<String> pantryItems) async {
+Future<List<GroqRecipe>> fetchGroqRecipes(List<String> pantryItems) async {
   final prompt = '''
 You are an expert Indian vegetarian chef. Based on these ingredients: ${pantryItems.join(', ')},
 suggest 5 Indian vegetarian eggless recipes that can be made.
@@ -781,10 +775,10 @@ Rules:
 ''';
 
   final response = await http.post(
-    Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+    Uri.parse('https://pantry-chef-server.onrender.com/groq'),
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer $apiKey',
+      'X-App-Token': 'pantry-chef-app',
     },
     body: jsonEncode({
       'model': 'llama-3.3-70b-versatile',
@@ -820,7 +814,7 @@ Rules:
 }
 
 // Search recipes by keyword
-Future<List<GroqRecipe>> searchGroqRecipes(String apiKey, String keyword, List<String> pantryItems) async {
+Future<List<GroqRecipe>> searchGroqRecipes(String keyword, List<String> pantryItems) async {
   final pantryContext = pantryItems.isNotEmpty
       ? 'I have these ingredients available: \${pantryItems.join(", ")}.'
       : '';
@@ -858,10 +852,10 @@ Rules:
 ''';
 
   final response = await http.post(
-    Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+    Uri.parse('https://pantry-chef-server.onrender.com/groq'),
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + apiKey,
+      'X-App-Token': 'pantry-chef-app',
     },
     body: jsonEncode({
       'model': 'llama-3.3-70b-versatile',
@@ -886,7 +880,7 @@ Rules:
 }
 
 // Deduce inventory based on recipe cooked
-Future<Map<String, double>> deduceInventoryWithGroq(String apiKey, String recipeName, int servings, List<String> pantryItems) async {
+Future<Map<String, double>> deduceInventoryWithGroq(String recipeName, int servings, List<String> pantryItems) async {
   final prompt = '''
 A user cooked "\$recipeName" for \$servings people.
 Their current pantry: \${pantryItems.join(", ")}.
@@ -902,10 +896,10 @@ No explanation, no markdown, just the JSON object.
 ''';
 
   final response = await http.post(
-    Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
+    Uri.parse('https://pantry-chef-server.onrender.com/groq'),
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + apiKey,
+      'X-App-Token': 'pantry-chef-app',
     },
     body: jsonEncode({
       'model': 'llama-3.3-70b-versatile',
@@ -949,8 +943,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
   List<GroqRecipe> _groqRecipes = [];
   bool _isLoading = false;
   String _error = '';
-  String _apiKey = '';
-  bool _hasKey = false;
+
   SortOption _sortOption = SortOption.time;
   RecipeMode _mode = RecipeMode.pantry;
   final TextEditingController _searchController = TextEditingController();
@@ -963,13 +956,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
   }
 
   Future<void> _loadApiKey() async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = (prefs.getString('groq_api_key') ?? '').trim();
-    setState(() {
-      _apiKey = key;
-      _hasKey = key.isNotEmpty;
-    });
-    if (_hasKey && widget.pantryNames.isNotEmpty) {
+    if (widget.pantryNames.isNotEmpty) {
       _fetchRecipes();
     }
   }
@@ -982,16 +969,9 @@ class _RecipesScreenState extends State<RecipesScreen> {
 
   Future<void> _fetchRecipes() async {
     if (widget.pantryNames.isEmpty) return;
-    // Reload key fresh from storage every time
-    final prefs = await SharedPreferences.getInstance();
-    final freshKey = (prefs.getString('groq_api_key') ?? '').trim();
-    if (freshKey.isEmpty) {
-      setState(() { _hasKey = false; });
-      return;
-    }
-    setState(() { _isLoading = true; _error = ''; _mode = RecipeMode.pantry; _apiKey = freshKey; });
+    setState(() { _isLoading = true; _error = ''; _mode = RecipeMode.pantry; });
     try {
-      final recipes = await fetchGroqRecipes(freshKey, widget.pantryNames);
+      final recipes = await fetchGroqRecipes(widget.pantryNames);
       setState(() { _groqRecipes = recipes; _isLoading = false; });
     } catch (e) {
       debugPrint('Groq error: ' + e.toString());
@@ -1008,18 +988,11 @@ class _RecipesScreenState extends State<RecipesScreen> {
 
   Future<void> _searchRecipes(String keyword) async {
     if (keyword.trim().isEmpty) return;
-    // Reload key fresh from storage every time
-    final prefs = await SharedPreferences.getInstance();
-    final freshKey = (prefs.getString('groq_api_key') ?? '').trim();
-    if (freshKey.isEmpty) {
-      setState(() { _error = 'No API key found. Please add your Groq key in Settings.'; });
-      return;
-    }
     _lastSearch = keyword.trim();
     FocusScope.of(context).unfocus();
     setState(() { _isLoading = true; _error = ''; _mode = RecipeMode.search; });
     try {
-      final recipes = await searchGroqRecipes(freshKey, keyword, widget.pantryNames);
+      final recipes = await searchGroqRecipes(keyword, widget.pantryNames);
       setState(() { _groqRecipes = recipes; _isLoading = false; });
     } catch (e) {
       debugPrint('Search error: ' + e.toString());
@@ -1132,14 +1105,7 @@ class _RecipesScreenState extends State<RecipesScreen> {
               onPressed: isLoading ? null : () async {
                 setSheetState(() { isLoading = true; status = 'Calculating ingredients used...'; });
                 try {
-                  // Reload key fresh in case it wasn't loaded
-                  final prefs = await SharedPreferences.getInstance();
-                  final freshKey = (prefs.getString('groq_api_key') ?? _apiKey).trim();
-                  debugPrint('Deduction key length: ' + freshKey.length.toString());
-                  debugPrint('Deduction key starts with: ' + (freshKey.length > 6 ? freshKey.substring(0, 6) : freshKey));
-                  if (freshKey.isEmpty) throw Exception('No API key found. Please add your Groq key in Settings.');
-                  if (!freshKey.startsWith('gsk_')) throw Exception('Invalid API key format. Key should start with gsk_');
-                  final deductions = await deduceInventoryWithGroq(freshKey, recipeName, servings, widget.pantryNames);
+                  final deductions = await deduceInventoryWithGroq(recipeName, servings, widget.pantryNames);
                   widget.onDeductInventory(deductions);
                   setSheetState(() {
                     isLoading = false;
@@ -1178,20 +1144,12 @@ class _RecipesScreenState extends State<RecipesScreen> {
         title: const Text('Recipe Suggestions', style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2C2C2A))),
         backgroundColor: const Color(0xFFFAF8F5), elevation: 0,
         actions: [
-          if (_hasKey && widget.pantryNames.isNotEmpty && !_isLoading)
+          if (widget.pantryNames.isNotEmpty && !_isLoading)
             IconButton(icon: const Icon(Icons.refresh, color: Color(0xFFC0451A)), onPressed: _fetchRecipes, tooltip: 'Refresh from pantry'),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined, color: Color(0xFF5F5E5A)),
-            onPressed: () async {
-              await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
-              _loadApiKey();
-            },
-          ),
+
         ],
       ),
-      body: !_hasKey
-          ? _buildNoKeyScreen(context)
-          : widget.pantryNames.isEmpty
+      body: widget.pantryNames.isEmpty
           ? const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
         Icon(Icons.restaurant_menu_outlined, size: 64, color: Color(0xFFD3D1C7)),
         SizedBox(height: 16),
@@ -1399,267 +1357,5 @@ class _RecipesScreenState extends State<RecipesScreen> {
     );
   }
 
-  Widget _buildNoKeyScreen(BuildContext context) {
-    return Center(child: Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Container(width: 80, height: 80,
-            decoration: BoxDecoration(color: const Color(0xFFFDF3DC), borderRadius: BorderRadius.circular(20)),
-            child: const Icon(Icons.key, size: 40, color: Color(0xFFE8A317))),
-        const SizedBox(height: 20),
-        const Text('Add your Groq API Key', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Color(0xFF2C2C2A))),
-        const SizedBox(height: 8),
-        const Text('Get a free API key from console.groq.com to enable AI-powered recipe suggestions using Llama 4.',
-            textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: Color(0xFF5F5E5A), height: 1.5)),
-        const SizedBox(height: 24),
-        SizedBox(width: double.infinity, child: ElevatedButton.icon(
-          onPressed: () async {
-            await Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
-            _loadApiKey();
-          },
-          icon: const Icon(Icons.settings),
-          label: const Text('Enter API Key'),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFFC0451A), foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-        )),
-        const SizedBox(height: 12),
-        SizedBox(width: double.infinity, child: OutlinedButton.icon(
-          onPressed: () async {
-            final url = Uri.parse('https://console.groq.com');
-            if (await canLaunchUrl(url)) await launchUrl(url, mode: LaunchMode.externalApplication);
-          },
-          icon: const Icon(Icons.open_in_new, size: 16),
-          label: const Text('Get free key at console.groq.com'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFFC0451A),
-            side: const BorderSide(color: Color(0xFFC0451A)),
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-        )),
-      ]),
-    ));
-  }
-}
 
-// ─── Settings Screen ───────────────────────────────────────────────────────────
-
-class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
-  @override
-  State<SettingsScreen> createState() => _SettingsScreenState();
-}
-
-class _SettingsScreenState extends State<SettingsScreen> {
-  final TextEditingController _keyController = TextEditingController();
-  bool _obscure = true;
-  bool _saved = false;
-  bool _testing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadKey();
-  }
-
-  Future<void> _loadKey() async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = prefs.getString('groq_api_key') ?? '';
-    setState(() => _keyController.text = key);
-  }
-
-  Future<void> _saveKey() async {
-    final prefs = await SharedPreferences.getInstance();
-    final trimmed = _keyController.text.trim();
-    if (!trimmed.startsWith('gsk_')) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Key should start with gsk_ - please check and try again'),
-        backgroundColor: Color(0xFFE24B4A),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-    await prefs.setString('groq_api_key', trimmed);
-    setState(() => _saved = true);
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _saved = false);
-    });
-  }
-
-  Future<void> _testKey() async {
-    final trimmed = _keyController.text.trim();
-    if (trimmed.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Please enter a key first'),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-    setState(() => _testing = true);
-    try {
-      final response = await http.post(
-        Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + trimmed,
-        },
-        body: jsonEncode({
-          'model': 'llama-3.3-70b-versatile',
-          'messages': [{'role': 'user', 'content': 'Say OK'}],
-          'max_tokens': 5,
-        }),
-      );
-      debugPrint('Test status: ' + response.statusCode.toString());
-      debugPrint('Test body: ' + response.body);
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('API key works!'),
-          backgroundColor: Color(0xFF3B6D11),
-          behavior: SnackBarBehavior.floating,
-        ));
-        // Auto save if test passes
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('groq_api_key', trimmed);
-        setState(() => _saved = true);
-      } else {
-        final body = jsonDecode(response.body);
-        final msg = body['error']?['message'] ?? 'Unknown error';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Failed (' + response.statusCode.toString() + '): ' + msg),
-          backgroundColor: const Color(0xFFE24B4A),
-          behavior: SnackBarBehavior.floating,
-        ));
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Error: ' + e.toString()),
-        backgroundColor: const Color(0xFFE24B4A),
-        behavior: SnackBarBehavior.floating,
-      ));
-    }
-    setState(() => _testing = false);
-  }
-
-  Future<void> _clearKey() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('groq_api_key');
-    setState(() => _keyController.text = '');
-  }
-
-  @override
-  void dispose() { _keyController.dispose(); super.dispose(); }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFFAF8F5),
-      appBar: AppBar(
-        title: const Text('Settings', style: TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF2C2C2A))),
-        backgroundColor: const Color(0xFFFAF8F5), elevation: 0,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // Groq API Key section
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFD3D1C7), width: 0.5),
-            ),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Row(children: [
-                Icon(Icons.key, size: 18, color: Color(0xFFE8A317)),
-                SizedBox(width: 8),
-                Text('Groq API Key', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF2C2C2A))),
-              ]),
-              const SizedBox(height: 4),
-              const Text('Get your free key at console.groq.com', style: TextStyle(fontSize: 12, color: Color(0xFF888780))),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _keyController,
-                obscureText: _obscure,
-                decoration: InputDecoration(
-                  hintText: 'gsk_...',
-                  hintStyle: const TextStyle(color: Color(0xFFB4B2A9)),
-                  filled: true,
-                  fillColor: const Color(0xFFF1EFE8),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  suffixIcon: IconButton(
-                    icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 18, color: const Color(0xFF888780)),
-                    onPressed: () => setState(() => _obscure = !_obscure),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              // Test button
-              SizedBox(width: double.infinity, child: ElevatedButton(
-                onPressed: _testing ? null : _testKey,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF185FA5),
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-                child: _testing
-                    ? const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  SizedBox(width: 16, height: 16, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)),
-                  SizedBox(width: 8),
-                  Text('Testing...'),
-                ])
-                    : const Text('Test & Save Key', style: TextStyle(fontWeight: FontWeight.w600)),
-              )),
-              const SizedBox(height: 8),
-              Row(children: [
-                Expanded(child: ElevatedButton(
-                  onPressed: _saveKey,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _saved ? const Color(0xFF3B6D11) : const Color(0xFFC0451A),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                  child: Text(_saved ? 'Saved!' : 'Save Key', style: const TextStyle(fontWeight: FontWeight.w600)),
-                )),
-                const SizedBox(width: 10),
-                OutlinedButton(
-                  onPressed: _clearKey,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFE24B4A),
-                    side: const BorderSide(color: Color(0xFFE24B4A)),
-                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                  child: const Text('Clear'),
-                ),
-              ]),
-            ]),
-          ),
-
-          const SizedBox(height: 16),
-
-          // Info box
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(color: const Color(0xFFFDF3DC), borderRadius: BorderRadius.circular(12)),
-            child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                Icon(Icons.info_outline, size: 16, color: Color(0xFF633806)),
-                SizedBox(width: 6),
-                Text('About Groq', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF633806))),
-              ]),
-              SizedBox(height: 6),
-              Text('Groq is free to use with generous limits (14,400 requests/day). Your API key is stored only on your device and never shared.',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF633806), height: 1.5)),
-            ]),
-          ),
-        ]),
-      ),
-    );
-  }
 }
